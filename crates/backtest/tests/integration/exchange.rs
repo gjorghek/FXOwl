@@ -36,7 +36,7 @@ use nautilus_backtest::{
     },
 };
 use nautilus_common::{
-    cache::Cache,
+    cache::{Cache, OrderBookSource},
     clock::VirtualClock,
     messages::execution::{CancelOrder, ModifyOrder, SubmitOrder, SubmitOrderList, TradingCommand},
     msgbus::{
@@ -62,7 +62,7 @@ use nautilus_model::{
     accounts::{Account, AccountAny, CashAccount, MarginAccount},
     data::{
         Bar, BarType, BookOrder, Data, FundingRateUpdate, InstrumentStatus, MarkPriceUpdate,
-        OrderBookDelta, OrderBookDeltas, QuoteTick, TradeTick,
+        OrderBookDelta, OrderBookDeltas, OrderBookDepth, QuoteTick, TradeTick,
     },
     enums::{
         AccountType, AggressorSide, AssetClass, BookAction, BookType, ContingencyType,
@@ -85,6 +85,7 @@ use nautilus_model::{
             gbpusd_sim,
         },
     },
+    orderbook::OrderBook,
     orders::{Order, OrderAny, OrderList, OrderTestBuilder, stubs::TestOrderEventStubs},
     position::Position,
     stubs::TestDefault,
@@ -7512,5 +7513,89 @@ fn test_same_instrument_oto_resize_preserves_valid_quantity_precision(
             .unwrap()
             .order_exists(child_id),
         !full_trigger
+    );
+}
+
+#[rstest]
+#[case::deltas(false)]
+#[case::depth(true)]
+fn test_exchange_book_processing_uses_explicit_input(
+    crypto_perpetual_ethusdt: CryptoPerpetual,
+    #[case] depth: bool,
+) {
+    let instrument_id = crypto_perpetual_ethusdt.id;
+    let cache = Rc::new(RefCell::new(Cache::default()));
+    let selected = if depth {
+        OrderBookSource::Deltas
+    } else {
+        OrderBookSource::Depth
+    };
+    cache
+        .borrow_mut()
+        .set_order_book_source(instrument_id, selected)
+        .unwrap();
+    let exchange = get_exchange(
+        instrument_id.venue,
+        AccountType::Margin,
+        BookType::L2_MBP,
+        Some(cache.clone()),
+    );
+    exchange
+        .borrow_mut()
+        .add_instrument(InstrumentAny::CryptoPerpetual(crypto_perpetual_ethusdt))
+        .unwrap();
+    let snapshot = OrderBookDepth::new(
+        instrument_id,
+        vec![BookOrder::new(
+            OrderSide::Buy,
+            Price::from("999.00"),
+            Quantity::from("1.000"),
+            0,
+        )],
+        vec![
+            BookOrder::new(
+                OrderSide::Sell,
+                Price::from("1000.00"),
+                Quantity::from("1.000"),
+                0,
+            ),
+            BookOrder::new(
+                OrderSide::Sell,
+                Price::from("1001.00"),
+                Quantity::from("2.000"),
+                0,
+            ),
+        ],
+        vec![0],
+        vec![0, 0],
+        0,
+        19,
+        1.into(),
+        1.into(),
+    );
+    let mut expected = OrderBook::new(instrument_id, BookType::L2_MBP);
+    expected.apply_depth(&snapshot).unwrap();
+
+    if depth {
+        exchange
+            .borrow_mut()
+            .process_order_book_depth(&snapshot)
+            .unwrap();
+    } else {
+        let deltas = expected.to_deltas(snapshot.ts_event, snapshot.ts_init);
+        exchange
+            .borrow_mut()
+            .process_order_book_deltas(&deltas)
+            .unwrap();
+    }
+
+    let exchange = exchange.borrow();
+    let book = exchange.get_book(instrument_id).unwrap();
+    assert_eq!(book.bids_as_map(None), expected.bids_as_map(None));
+    assert_eq!(book.asks_as_map(None), expected.asks_as_map(None));
+    assert_eq!(book.best_ask_price(), Some(Price::from("1000.00")));
+    assert_eq!(
+        cache.borrow().order_book_source(&instrument_id),
+        Some(selected)
     );
 }

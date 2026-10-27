@@ -553,21 +553,7 @@ impl DataEngine {
         self.cancel_pending_option_chain_requests(None);
         self.clear_option_chain_greeks_bootstraps();
 
-        // Unsubscribe BookUpdaters before dropping; otherwise the typed router
-        // keeps dispatching to abandoned updaters. `book_updaters` is keyed by
-        // per-underlying id, so the literal per-underlying topic is the same
-        // string the subscribe path used.
-        let book_updaters: Vec<(InstrumentId, Rc<BookUpdater>)> =
-            self.book_updaters.drain().collect();
-        for (instrument_id, updater) in book_updaters {
-            let deltas_topic = switchboard::get_book_deltas_topic(instrument_id);
-            let depth_topic = switchboard::get_book_depth_topic(instrument_id);
-            let deltas_handler: TypedHandler<OrderBookDeltas> =
-                TypedHandler::new(Rc::clone(&updater));
-            let depth_handler: TypedHandler<OrderBookDepth> = TypedHandler::new(updater);
-            msgbus::unsubscribe_book_deltas(deltas_topic.into(), &deltas_handler);
-            msgbus::unsubscribe_book_depth(depth_topic.into(), &depth_handler);
-        }
+        self.clear_book_updaters();
 
         self.book_subscriptions.clear();
         self.book_subscription_owners.clear();
@@ -608,6 +594,7 @@ impl DataEngine {
             }
         }
 
+        self.clear_book_updaters();
         self.clear_option_chain_greeks_bootstraps();
 
         // Continuous-future source handlers live outside bar_aggregator_handlers,
